@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+
+# Usage:
+#
+#     $ bin/compile <build-dir> <cache-dir>
+
+
+
+# Prepend proper path for virtualenv hackery. This will be deprecated soon.
+export PATH=:/usr/local/bin:$PATH
+
+# Paths.
+BIN_DIR=$(cd $(dirname $0); pwd) # absolute path
+ROOT_DIR=$(dirname $BIN_DIR)
+BUILD_DIR=$1
+CACHE_DIR=$2
+
+CACHED_DIRS=".heroku"
+
+# Sanitizing environment variables.
+unset GIT_DIR PYTHONHOME PYTHONPATH LD_LIBRARY_PATH LIBRARY_PATH
+
+# We'll need to send these statics to other scripts we `source`.
+export BUILD_DIR CACHE_DIR BIN_DIR PROFILE_PATH
+
+# Syntax sugar.
+source $BIN_DIR/utils
+
+# Directory Hacks for path consistiency.
+APP_DIR='/app'
+TMP_APP_DIR=$CACHE_DIR/tmp_app_dir
+
+# Copy Anvil app dir to temporary storage...
+mkdir -p $TMP_APP_DIR
+deep-mv $APP_DIR $TMP_APP_DIR
+
+# Copy Application code in.
+deep-mv $BUILD_DIR $APP_DIR
+
+# Set new context.
+ORIG_BUILD_DIR=$BUILD_DIR
+BUILD_DIR=$APP_DIR
+
+# Prepend proper path buildpack use.
+export PATH=$BUILD_DIR/.heroku/python/bin:$PATH
+export PYTHONUNBUFFERED=1
+export LANG=en_US.UTF-8
+export LIBRARY_PATH=/app/.heroku/vendor/lib
+export LD_LIBRARY_PATH=/app/.heroku/vendor/lib
+
+# Switch to the repo's context.
+cd $BUILD_DIR
+
+# Experimental pre_compile hook.
+source $BIN_DIR/steps/hooks/pre_compile
+
+
+# ### The Cache
+mkdir -p $CACHE_DIR
+
+
+# Restore old artifacts from the cache.
+for dir in $CACHED_DIRS; do
+  cp -R $CACHE_DIR/$dir . &> /dev/null || true
+done
+
+set +e
+# Create set-aside `.heroku` folder.
+mkdir .heroku &> /dev/null
+set -e
+
+mkdir -p $(dirname $PROFILE_PATH)
+
+set +e
+
+
+
+
+
+set -e
+hash -r
+
+# Pylibmc support.
+# See [`bin/steps/pylibmc`](pylibmc.html).
+# source $BIN_DIR/steps/pylibmc
+
+# libffi support.
+source $BIN_DIR/steps/libffi
+
+# pdf2htmlEX support
+source $BIN_DIR/steps/fontforge
+# source $BIN_DIR/steps/poppler
+# source $BIN_DIR/steps/pdf2htmlex
+
+# Install Mercurial if it appears to be required.
+if (grep -Fiq "hg+" requirements.txt) then
+  /app/.heroku/python/bin/pip install --use-mirrors mercurial | cleanup | indent
+fi
+
+
+# Load enviornment variables in ENV_DIR into the
+# enviornment, because manage.py will need them
+# soon. The blacklisted variables will not be loaded.
+blacklist_regex=${3:-'^(PATH|GIT_DIR|CPATH|CPPATH|LD_PRELOAD|LIBRARY_PATH)$'}
+puts-step "Load enviornment variables from app configuration"
+env_dir=$3
+if [ -d "$env_dir" ]; then
+  for e in $(ls $env_dir); do
+    echo "$e" | grep -qvE "$blacklist_regex" &&
+    export "$e=$(cat $env_dir/$e)"
+    :
+  done
+fi
+
+
+# Set context environment variables.
+set-env PATH '$HOME/.heroku/python/bin:/app/vendor/pdf2htmlEX/bin:$PATH'
+# set-env PYTHONUNBUFFERED true
+# set-env PYTHONHOME /app/.heroku/python
+set-default-env LIBRARY_PATH /app/.heroku/vendor/lib
+set-default-env LD_LIBRARY_PATH /app/.heroku/vendor/lib:/app/vendor/libffi-3.0/lib:/app/vendor/poppler/lib:/app/vendor/fontforge/lib
+echo "set LD path ==============================================================="
+set-default-env LANG en_US.UTF-8
+set-default-env PYTHONHASHSEED random
+set-default-env PYTHONPATH /app/
+
+
+# Experimental post_compile hook.
+source $BIN_DIR/steps/hooks/post_compile
+
+# Store new artifacts in cache.
+for dir in $CACHED_DIRS; do
+  rm -rf $CACHE_DIR/$dir
+  cp -R $dir $CACHE_DIR/
+done
+
+# ### Fin.
+
+deep-mv $BUILD_DIR $ORIG_BUILD_DIR
+deep-mv $TMP_APP_DIR $APP_DIR
